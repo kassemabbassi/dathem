@@ -1,15 +1,23 @@
 import tkinter as tk
 import random
+import math
+import os
 import cv2
 import face_recognition
+from PIL import Image, ImageTk, ImageEnhance
 
 PASSWORD = "kassem030903"
+EYES_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eyes.jpg")
 
 
 class LockScreen:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.attributes('-fullscreen', True)
+        self.width = self.root.winfo_screenwidth()
+        self.height = self.root.winfo_screenheight()
+
+        self.root.geometry(f"{self.width}x{self.height}+0+0")
+        self.root.overrideredirect(True)  # removes title bar/borders entirely
         self.root.attributes('-topmost', True)
         self.root.configure(bg='black')
         self.root.protocol("WM_DELETE_WINDOW", self.block_close)
@@ -17,48 +25,83 @@ class LockScreen:
         self.root.bind("<Escape>", lambda e: "break")
         self.root.focus_force()
 
-        self.width = self.root.winfo_screenwidth()
-        self.height = self.root.winfo_screenheight()
         self.captured_encoding = None
 
         self.canvas = tk.Canvas(self.root, width=self.width, height=self.height,
                                  bg='black', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True)
 
-        # --- Static cracked-glass / blood-spatter background (drawn once) ---
-        self.draw_cracks(count=22)
-        self.draw_splatters(count=14)
+        # --- Eyes background: cover the whole screen, then precompute a few
+        #     brightness levels so the eyes appear to "glow"/breathe over time ---
+        self.bg_variants = self.load_eyes_background()
+        self.bg_index = 0
+        self.bg_dir = 1
+        if self.bg_variants:
+            self.bg_image_id = self.canvas.create_image(
+                0, 0, image=self.bg_variants[len(self.bg_variants) // 2], anchor="nw"
+            )
+        else:
+            self.bg_image_id = None
 
-        # --- Big title, glitch-jittered + flickering, with a drip trail under it ---
+        # A soft dark overlay so text stays readable over the image
+        self.overlay_id = self.canvas.create_rectangle(
+            0, 0, self.width, self.height, fill="#000000", outline="", stipple="gray25"
+        )
+
+        # --- Static cracked-glass / blood-spatter overlay (drawn once, on top) ---
+        self.draw_cracks(count=30)
+        self.draw_splatters(count=16)
+
+        # --- Title, positioned near the top so it never overlaps the eyes ---
         self.title_base_x = self.width // 2
-        self.title_base_y = self.height // 4
+        self.title_base_y = int(self.height * 0.11)
+
+        self.glow_ids = []
+        glow_colors = ["#1a0000", "#2a0000", "#3a0000", "#4a0000"]
+        for i, gcol in enumerate(glow_colors):
+            pad = 90 - i * 18
+            gid = self.canvas.create_oval(
+                self.title_base_x - 260 - pad, self.title_base_y - 45 - pad // 2,
+                self.title_base_x + 260 + pad, self.title_base_y + 45 + pad // 2,
+                fill=gcol, outline=""
+            )
+            self.glow_ids.append(gid)
+
         self.title_id = self.canvas.create_text(
             self.title_base_x, self.title_base_y,
             text="DATHEM CAPTURES YOU",
-            font=("Impact", 58, "bold"),
-            fill="#8B0000"
+            font=("Impact", 56, "bold"),
+            fill="#FF0000"
         )
+        self.title_ghost_id = self.canvas.create_text(
+            self.title_base_x + 3, self.title_base_y + 2,
+            text="DATHEM CAPTURES YOU",
+            font=("Impact", 56, "bold"),
+            fill="#3a0000"
+        )
+        self.canvas.tag_raise(self.title_id, self.title_ghost_id)
+
         self.title_drips = self.attach_drips_below_text(
-            self.title_base_x, self.title_base_y + 35, width=520, count=10
+            self.title_base_x, self.title_base_y + 34, width=540, count=14
         )
 
         self.subtitle_id = self.canvas.create_text(
-            self.width // 2, self.title_base_y + 90,
+            self.width // 2, self.title_base_y + 92,
             text="UNAUTHORIZED PRESENCE DETECTED",
-            font=("Consolas", 16),
-            fill="#B22222"
+            font=("Consolas", 16, "bold"),
+            fill="#D62828"
         )
 
-        # --- Requested line ---
-        self.warning_id = self.canvas.create_text(
-            self.width // 2, self.title_base_y + 125,
-            text="aya sidi ay chtaaml ghadi hani fo9t bik",
-            font=("Consolas", 14, "italic"),
-            fill="#7A0000"
-        )
+        # --- Flickering static noise specks over the whole screen ---
+        self.static_ids = []
+        for _ in range(50):
+            x = random.randint(0, self.width)
+            y = random.randint(0, self.height)
+            s = random.randint(1, 3)
+            sid = self.canvas.create_rectangle(x, y, x + s, y + s, fill="#2a0000", outline="")
+            self.static_ids.append(sid)
 
-        # --- Password field: characters replaced by a space -> nothing visible,
-        #     only the cursor moves. ---
+        # --- Password field, positioned low so the eyes stay fully visible above it ---
         self.pw_var = tk.StringVar()
         self.entry = tk.Entry(
             self.root, textvariable=self.pw_var,
@@ -67,47 +110,82 @@ class LockScreen:
             relief="flat", justify="center", width=20,
             highlightthickness=2, highlightbackground="#8B0000", highlightcolor="#FF0000"
         )
-        self.canvas.create_window(self.width // 2, self.height // 2 + 40, window=self.entry)
+        self.entry_y = int(self.height * 0.80)
+        self.canvas.create_window(self.width // 2, self.entry_y, window=self.entry)
         self.entry.bind("<Return>", self.check_password)
+        self.entry.bind("<KeyPress>", self.on_password_keypress)
         self.entry.focus_set()
 
         self.hint_id = self.canvas.create_text(
-            self.width // 2, self.height // 2 + 80,
+            self.width // 2, self.entry_y + 38,
             text="Enter password and press Enter",
             font=("Consolas", 11),
-            fill="#4a4a4a"
+            fill="#666666"
         )
 
-        # --- Falling blood-rain lines across the whole screen ---
+        # --- Falling blood-rain across the whole screen ---
         self.rain = []
-        for _ in range(45):
+        rain_colors = ["#6B0000", "#8B0000", "#A80000", "#5C0000"]
+        for _ in range(70):
             x = random.randint(0, self.width)
             y = random.randint(-self.height, 0)
-            length = random.randint(12, 55)
-            speed = random.uniform(3, 9)
-            rid = self.canvas.create_line(x, y, x, y + length, fill="#6B0000", width=2)
+            length = random.randint(12, 60)
+            speed = random.uniform(3, 10)
+            col = random.choice(rain_colors)
+            rid = self.canvas.create_line(x, y, x, y + length, fill=col, width=random.choice([1, 2, 2, 3]))
             self.rain.append([rid, x, y, length, speed])
 
-        # --- Blood pool slowly filling the bottom of the screen ---
-        self.pool_height = 0
-        self.pool_id = self.canvas.create_rectangle(
-            0, self.height, self.width, self.height,
-            fill="#4a0000", outline=""
-        )
-
-        # --- Vignette pulse (glowing red border that breathes like a heartbeat) ---
+        # --- Pulsing vignette border ---
         self.border_id = self.canvas.create_rectangle(
-            4, 4, self.width - 4, self.height - 4,
-            outline="#8B0000", width=6
+            4, 4, self.width - 4, self.height - 4, outline="#8B0000", width=6
+        )
+        self.border_inner_id = self.canvas.create_rectangle(
+            14, 14, self.width - 14, self.height - 14, outline="#3a0000", width=2
         )
 
         self.flicker_state = 0
         self.pulse_dir = 1
         self.pulse_width = 6
+        self.bg_pulse_counter = 0
         self.animate()
 
         self.root.after(100, self.refocus)
         self.root.mainloop()
+
+    # ---------- background image ----------
+
+    def load_eyes_background(self):
+        if not os.path.exists(EYES_IMAGE_PATH):
+            print(f"WARNING: {EYES_IMAGE_PATH} not found - running without eyes background.")
+            return []
+
+        img = Image.open(EYES_IMAGE_PATH).convert("RGB")
+
+        # Cover-fit: scale so the image fully covers the screen, then center-crop
+        img_ratio = img.width / img.height
+        screen_ratio = self.width / self.height
+
+        if img_ratio > screen_ratio:
+            new_height = self.height
+            new_width = int(new_height * img_ratio)
+        else:
+            new_width = self.width
+            new_height = int(new_width / img_ratio)
+
+        img = img.resize((new_width, new_height), Image.LANCZOS)
+
+        left = (new_width - self.width) // 2
+        top = (new_height - self.height) // 2
+        img = img.crop((left, top, left + self.width, top + self.height))
+
+        # Precompute a handful of brightness levels for a slow "breathing glow"
+        levels = [0.55, 0.75, 1.0, 1.3, 1.6, 1.3, 1.0, 0.75]
+        variants = []
+        for level in levels:
+            enhancer = ImageEnhance.Brightness(img)
+            variant = enhancer.enhance(level)
+            variants.append(ImageTk.PhotoImage(variant))
+        return variants
 
     # ---------- static decoration builders ----------
 
@@ -129,16 +207,13 @@ class LockScreen:
                 r = random.randint(3, 14)
                 ox = cx + random.randint(-40, 40)
                 oy = cy + random.randint(-40, 40)
-                self.canvas.create_oval(
-                    ox - r, oy - r, ox + r, oy + r,
-                    fill="#5c0000", outline=""
-                )
+                self.canvas.create_oval(ox - r, oy - r, ox + r, oy + r, fill="#5c0000", outline="")
 
     def attach_drips_below_text(self, cx, top_y, width, count):
         drips = []
         for _ in range(count):
             x = cx + random.randint(-width // 2, width // 2)
-            length = random.randint(15, 60)
+            length = random.randint(15, 55)
             speed = random.uniform(1.5, 4)
             did = self.canvas.create_line(x, top_y, x, top_y + length, fill="#8B0000", width=2)
             drips.append([did, x, top_y, length, speed])
@@ -147,38 +222,100 @@ class LockScreen:
     # ---------- window behavior ----------
 
     def block_close(self):
-        pass  # ignore the window-close (X) request entirely
+        pass
 
     def refocus(self):
         self.entry.focus_force()
         self.root.after(500, self.refocus)
+
+    def on_password_keypress(self, event):
+        """Flash a small blood effect near the password field for each key."""
+        # Let Tk handle editing/navigation keys normally, but animate only
+        # characters that can contribute to the password.
+        if event.char and event.char.isprintable():
+            self.blood_key_effect()
+
+    def blood_key_effect(self):
+        cx = self.width // 2 + random.randint(-115, 115)
+        cy = self.entry_y + random.randint(-17, 17)
+        colors = ("#FF1A1A", "#B22222", "#8B0000", "#5C0000")
+        ids = []
+        for _ in range(random.randint(5, 9)):
+            angle = random.uniform(0, 6.283)
+            distance = random.randint(5, 25)
+            x = cx + int(distance * math.cos(angle))
+            y = cy + int(distance * math.sin(angle))
+            radius = random.randint(2, 5)
+            ids.append(self.canvas.create_oval(
+                x - radius, y - radius, x + radius, y + radius,
+                fill=random.choice(colors), outline=""
+            ))
+
+        def fade(step=0):
+            if step >= 5:
+                for item_id in ids:
+                    self.canvas.delete(item_id)
+                return
+            for item_id in ids:
+                self.canvas.itemconfig(item_id, stipple=("gray50", "gray25", "gray12", "gray50", "gray25")[step])
+            self.root.after(45, lambda: fade(step + 1))
+
+        fade()
 
     # ---------- animation loop ----------
 
     def animate(self):
         self.flicker_state += 1
 
-        # Flicker the title through shades of red, with an occasional glitch jump
-        colors = ["#8B0000", "#B22222", "#FF1A1A", "#8B0000", "#5C0000", "#FF0000"]
+        # Pulse the eyes' brightness slowly (breathing glow), independent of the
+        # faster title flicker
+        self.bg_pulse_counter += 1
+        if self.bg_variants and self.bg_pulse_counter % 6 == 0:
+            self.bg_index = (self.bg_index + 1) % len(self.bg_variants)
+            self.canvas.itemconfig(self.bg_image_id, image=self.bg_variants[self.bg_index])
+
+        colors = ["#8B0000", "#B22222", "#FF1A1A", "#8B0000", "#5C0000", "#FF0000", "#FF4500"]
         self.canvas.itemconfig(self.title_id, fill=colors[self.flicker_state % len(colors)])
 
-        if random.random() < 0.08:
-            jitter_x = self.title_base_x + random.randint(-6, 6)
-            jitter_y = self.title_base_y + random.randint(-3, 3)
+        if random.random() < 0.02:
+            self.canvas.itemconfig(self.title_id, fill="#000000")
+
+        if random.random() < 0.10:
+            jitter_x = self.title_base_x + random.randint(-8, 8)
+            jitter_y = self.title_base_y + random.randint(-4, 4)
+            ghost_x = jitter_x + random.randint(-4, 4)
+            ghost_y = jitter_y + random.randint(-3, 3)
             self.canvas.coords(self.title_id, jitter_x, jitter_y)
+            self.canvas.coords(self.title_ghost_id, ghost_x, ghost_y)
         else:
             self.canvas.coords(self.title_id, self.title_base_x, self.title_base_y)
+            self.canvas.coords(self.title_ghost_id, self.title_base_x + 3, self.title_base_y + 2)
 
-        # Drips growing/falling below the title
+        pulse = 1 + 0.05 * ((self.flicker_state % 30) - 15) / 15
+        for i, gid in enumerate(self.glow_ids):
+            pad = (90 - i * 18) * pulse
+            self.canvas.coords(
+                gid,
+                self.title_base_x - 260 - pad, self.title_base_y - 45 - pad // 2,
+                self.title_base_x + 260 + pad, self.title_base_y + 45 + pad // 2,
+            )
+
+        for sid in self.static_ids:
+            if random.random() < 0.15:
+                x0, y0, x1, y1 = self.canvas.coords(sid)
+                nx = random.randint(0, self.width)
+                ny = random.randint(0, self.height)
+                self.canvas.coords(sid, nx, ny, nx + (x1 - x0), ny + (y1 - y0))
+                self.canvas.itemconfig(sid, fill=random.choice(["#2a0000", "#4a0000", "#1a1a1a"]))
+
         for drip in self.title_drips:
             did, x, y, length, speed = drip
             length += speed
-            if length > 90:
+            if length > 85:
                 length = random.randint(15, 30)
             self.canvas.coords(did, x, y, x, y + length)
             drip[3] = length
 
-        # Full-screen blood rain
         for drop in self.rain:
             did, x, y, length, speed = drop
             y += speed
@@ -188,21 +325,13 @@ class LockScreen:
             self.canvas.coords(did, x, y, x, y + length)
             drop[2] = y
 
-        # Rising blood pool at the bottom (slow, stops near an eighth of the screen)
-        if self.pool_height < self.height * 0.12:
-            self.pool_height += 0.3
-            self.canvas.coords(
-                self.pool_id,
-                0, self.height - self.pool_height, self.width, self.height
-            )
-
-        # Heartbeat-style pulsing border thickness
-        self.pulse_width += self.pulse_dir * 0.4
-        if self.pulse_width > 10 or self.pulse_width < 3:
+        self.pulse_width += self.pulse_dir * 0.5
+        if self.pulse_width > 12 or self.pulse_width < 3:
             self.pulse_dir *= -1
         self.canvas.itemconfig(self.border_id, width=self.pulse_width)
+        self.canvas.itemconfig(self.border_inner_id, width=max(1, self.pulse_width / 4))
 
-        self.root.after(60, self.animate)
+        self.root.after(55, self.animate)
 
     # ---------- password check ----------
 
@@ -215,9 +344,6 @@ class LockScreen:
             self.pw_var.set("")
 
     def capture_face(self):
-        """Grabs the current person's face right as they unlock, so
-        guard.py can grant them session trust and avoid re-locking on
-        the very next check."""
         cam = cv2.VideoCapture(0)
         encoding = None
         if cam.isOpened():
@@ -236,8 +362,18 @@ class LockScreen:
         return encoding
 
     def flash_wrong(self):
-        self.canvas.configure(bg="#4a0000")
-        self.root.after(150, lambda: self.canvas.configure(bg="black"))
+        self.canvas.itemconfig(self.overlay_id, fill="#5a0000")
+        self.root.after(150, lambda: self.canvas.itemconfig(self.overlay_id, fill="#000000"))
+        self.shake_screen()
+
+    def shake_screen(self, count=6):
+        if count <= 0:
+            self.root.geometry(f"{self.width}x{self.height}+0+0")
+            return
+        dx = random.randint(-10, 10)
+        dy = random.randint(-8, 8)
+        self.root.geometry(f"{self.width}x{self.height}+{dx}+{dy}")
+        self.root.after(35, lambda: self.shake_screen(count - 1))
 
 
 if __name__ == "__main__":
