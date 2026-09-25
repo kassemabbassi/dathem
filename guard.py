@@ -26,8 +26,13 @@ print(f"Loaded {len(known_encodings)} samples for: {list(data.keys())}")
 
 
 def lock_windows():
+    """Shows the lock screen and blocks until unlocked. If the correct
+    password was entered, returns the face encoding captured at that
+    moment so the caller can grant this person session-level trust.
+    Returns None if no face could be captured (encoding stays untrusted)."""
     print(">>> TRIGGERING LOCK SCREEN <<<")
-    LockScreen()  # blocks here until the correct password is entered
+    screen = LockScreen()
+    return screen.captured_encoding
 
 
 def analyze_frame(frame):
@@ -51,6 +56,41 @@ def analyze_frame(frame):
             names_seen.append("unknown")
 
     return total, unknown_count, names_seen
+
+
+def grant_session_trust(encoding):
+    """Adds a freshly captured face to the in-memory known list for the
+    rest of this run. NOT saved to encodings.pkl - resets next time
+    guard.py is restarted. This is what stops an immediate re-lock
+    right after someone correctly enters the password."""
+    if encoding is None:
+        print("WARNING: Could not capture a face at unlock time - "
+              "session trust not granted, this person may be re-locked.")
+        return
+
+    known_encodings.append(encoding)
+    known_names.append("session_trusted")
+    print(">>> Session trust granted to the person who unlocked the screen <<<")
+
+
+def trigger_lock(cam):
+    """Releases the main-loop camera handle before showing the lock
+    screen (which needs its own exclusive access to the webcam to
+    capture the unlocking person's face), then reopens it afterward.
+    Returns a fresh, working VideoCapture object to keep using in the
+    main loop - the caller must replace its `cam` variable with it."""
+    print(">>> Releasing camera before showing lock screen...")
+    cam.release()
+
+    captured = lock_windows()
+    grant_session_trust(captured)
+
+    print(">>> Reopening camera after unlock...")
+    new_cam = cv2.VideoCapture(0)
+    if not new_cam.isOpened():
+        print("WARNING: Could not reopen camera after unlock. "
+              "Guard will keep retrying.")
+    return new_cam
 
 
 def main():
@@ -81,7 +121,7 @@ def main():
                 elapsed = now - absence_start
                 print(f"[{time.strftime('%H:%M:%S')}] No one detected ({elapsed:.0f}s)")
                 if elapsed >= ABSENCE_LOCK_AFTER and (now - last_lock_time) > LOCK_COOLDOWN:
-                    lock_windows()
+                    cam = trigger_lock(cam)
                     last_lock_time = time.time()
                     absence_start = None
                 consecutive_bad = 0
@@ -94,7 +134,7 @@ def main():
                     print(f"[{time.strftime('%H:%M:%S')}] Faces: {names_seen} "
                           f"-> unknown present ({consecutive_bad}/{BAD_READINGS_TO_LOCK})")
                     if consecutive_bad >= BAD_READINGS_TO_LOCK and (now - last_lock_time) > LOCK_COOLDOWN:
-                        lock_windows()
+                        cam = trigger_lock(cam)
                         last_lock_time = time.time()
                         consecutive_bad = 0
                 else:

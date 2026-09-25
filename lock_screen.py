@@ -1,5 +1,7 @@
 import tkinter as tk
 import random
+import cv2
+import face_recognition
 
 PASSWORD = "kassem030903"
 
@@ -17,6 +19,7 @@ class LockScreen:
 
         self.width = self.root.winfo_screenwidth()
         self.height = self.root.winfo_screenheight()
+        self.captured_encoding = None
 
         self.canvas = tk.Canvas(self.root, width=self.width, height=self.height,
                                  bg='black', highlightthickness=0)
@@ -205,10 +208,32 @@ class LockScreen:
 
     def check_password(self, event=None):
         if self.pw_var.get() == PASSWORD:
+            self.captured_encoding = self.capture_face()
             self.root.destroy()
         else:
             self.flash_wrong()
             self.pw_var.set("")
+
+    def capture_face(self):
+        """Grabs the current person's face right as they unlock, so
+        guard.py can grant them session trust and avoid re-locking on
+        the very next check."""
+        cam = cv2.VideoCapture(0)
+        encoding = None
+        if cam.isOpened():
+            for _ in range(6):
+                ret, frame = cam.read()
+                if not ret:
+                    continue
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                locations = face_recognition.face_locations(rgb, model="hog")
+                if locations:
+                    encs = face_recognition.face_encodings(rgb, locations)
+                    if encs:
+                        encoding = encs[0]
+                        break
+        cam.release()
+        return encoding
 
     def flash_wrong(self):
         self.canvas.configure(bg="#4a0000")
