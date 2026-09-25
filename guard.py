@@ -3,7 +3,7 @@ import face_recognition
 import pickle
 import numpy as np
 import time
-import ctypes
+from lock_screen import LockScreen
 
 TOLERANCE = 0.5
 CHECK_INTERVAL = 2          # seconds between checks
@@ -26,8 +26,8 @@ print(f"Loaded {len(known_encodings)} samples for: {list(data.keys())}")
 
 
 def lock_windows():
-    print(">>> LOCKING WORKSTATION <<<")
-    ctypes.windll.user32.LockWorkStation()
+    print(">>> TRIGGERING LOCK SCREEN <<<")
+    LockScreen()  # blocks here until the correct password is entered
 
 
 def analyze_frame(frame):
@@ -82,7 +82,7 @@ def main():
                 print(f"[{time.strftime('%H:%M:%S')}] No one detected ({elapsed:.0f}s)")
                 if elapsed >= ABSENCE_LOCK_AFTER and (now - last_lock_time) > LOCK_COOLDOWN:
                     lock_windows()
-                    last_lock_time = now
+                    last_lock_time = time.time()
                     absence_start = None
                 consecutive_bad = 0
 
@@ -95,7 +95,7 @@ def main():
                           f"-> unknown present ({consecutive_bad}/{BAD_READINGS_TO_LOCK})")
                     if consecutive_bad >= BAD_READINGS_TO_LOCK and (now - last_lock_time) > LOCK_COOLDOWN:
                         lock_windows()
-                        last_lock_time = now
+                        last_lock_time = time.time()
                         consecutive_bad = 0
                 else:
                     consecutive_bad = 0
