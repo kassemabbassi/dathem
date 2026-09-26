@@ -111,7 +111,7 @@ class LockScreen:
             highlightthickness=2, highlightbackground="#8B0000", highlightcolor="#FF0000"
         )
         self.entry_y = int(self.height * 0.80)
-        self.canvas.create_window(self.width // 2, self.entry_y, window=self.entry)
+        self.entry_window = self.canvas.create_window(self.width // 2, self.entry_y, window=self.entry)
         self.entry.bind("<Return>", self.check_password)
         self.entry.bind("<KeyPress>", self.on_password_keypress)
         self.entry.focus_set()
@@ -122,6 +122,9 @@ class LockScreen:
             font=("Consolas", 11),
             fill="#666666"
         )
+        self.canvas.itemconfigure(self.entry_window, state="hidden")
+        self.canvas.itemconfigure(self.hint_id, state="hidden")
+        self.start_memory_game()
 
         # --- Falling blood-rain across the whole screen ---
         self.rain = []
@@ -225,8 +228,111 @@ class LockScreen:
         pass
 
     def refocus(self):
-        self.entry.focus_force()
+        if self.password_ready:
+            self.entry.focus_force()
         self.root.after(500, self.refocus)
+
+    # ---------- sequence challenge ----------
+
+    def start_memory_game(self):
+        """Run a short, escalating sequence game before password entry."""
+        self.password_ready = False
+        self.game_symbols = ["▲", "●", "■", "◆"]
+        self.game_sequence = []
+        self.game_round = 0
+        self.game_rounds = 5
+        self.game_input = []
+        self.game_locked = True
+        self.game_status = self.canvas.create_text(
+            self.width // 2, int(self.height * 0.57),
+            text="MEMORY CHALLENGE · 0 / 5",
+            font=("Consolas", 20, "bold"), fill="#FF4444"
+        )
+        self.game_prompt = self.canvas.create_text(
+            self.width // 2, int(self.height * 0.62),
+            text="Watch the sequence, then repeat it",
+            font=("Consolas", 14), fill="#DDDDDD"
+        )
+        self.game_display = self.canvas.create_text(
+            self.width // 2, int(self.height * 0.68),
+            text="",
+            font=("Consolas", 27, "bold"), fill="#FF1A1A"
+        )
+        self.game_buttons = []
+        spacing = 92
+        start_x = self.width // 2 - (len(self.game_symbols) - 1) * spacing // 2
+        for index, symbol in enumerate(self.game_symbols):
+            button = tk.Button(
+                self.root, text=symbol, font=("Segoe UI Symbol", 25, "bold"),
+                fg="#FF4444", bg="#160000", activeforeground="white",
+                activebackground="#8B0000", relief="flat", width=3,
+                command=lambda value=symbol: self.game_guess(value)
+            )
+            window_id = self.canvas.create_window(
+                start_x + index * spacing, int(self.height * 0.76), window=button
+            )
+            self.game_buttons.append((button, window_id))
+        self.next_game_round()
+
+    def next_game_round(self):
+        if self.game_round >= self.game_rounds:
+            self.finish_memory_game()
+            return
+        self.game_round += 1
+        self.game_sequence.append(random.choice(self.game_symbols))
+        self.game_input = []
+        self.game_locked = True
+        self.canvas.itemconfigure(
+            self.game_status, text=f"MEMORY CHALLENGE · {self.game_round} / {self.game_rounds}"
+        )
+        self.canvas.itemconfigure(self.game_prompt, text="Watch carefully…")
+        self.show_sequence(0)
+
+    def show_sequence(self, index):
+        if index >= len(self.game_sequence):
+            self.canvas.itemconfigure(self.game_display, text="")
+            self.canvas.itemconfigure(self.game_prompt, text="Repeat the sequence with the buttons")
+            self.game_locked = False
+            return
+        self.canvas.itemconfigure(self.game_display, text=self.game_sequence[index])
+        self.root.after(520, lambda: self.canvas.itemconfigure(self.game_display, text=""))
+        self.root.after(760, lambda: self.show_sequence(index + 1))
+
+    def game_guess(self, symbol):
+        if self.game_locked:
+            return
+        index = len(self.game_input)
+        if symbol != self.game_sequence[index]:
+            self.game_locked = True
+            self.canvas.itemconfigure(self.game_prompt, text="Wrong sequence · try this round again")
+            self.flash_wrong()
+            self.root.after(900, self.replay_game_round)
+            return
+        self.game_input.append(symbol)
+        self.canvas.itemconfigure(self.game_display, text="● " * len(self.game_input))
+        if len(self.game_input) == len(self.game_sequence):
+            self.game_locked = True
+            self.canvas.itemconfigure(self.game_prompt, text="Correct · next round")
+            self.root.after(650, self.next_game_round)
+
+    def replay_game_round(self):
+        self.canvas.itemconfigure(self.game_prompt, text="Watch carefully…")
+        self.show_sequence(0)
+
+    def finish_memory_game(self):
+        self.canvas.itemconfigure(self.game_status, text="CHALLENGE COMPLETE")
+        self.canvas.itemconfigure(self.game_prompt, text="Enter password and press Enter")
+        self.canvas.itemconfigure(self.game_display, text="")
+        for button, window_id in self.game_buttons:
+            button.destroy()
+            self.canvas.delete(window_id)
+        self.password_ready = True
+        self.canvas.itemconfigure(self.entry_window, state="normal")
+        self.canvas.itemconfigure(self.hint_id, state="normal")
+        self.canvas.itemconfigure(self.game_status, state="hidden")
+        self.canvas.itemconfigure(self.game_prompt, state="hidden")
+        self.canvas.itemconfigure(self.game_display, state="hidden")
+        self.entry.focus_force()
 
     def on_password_keypress(self, event):
         """Flash a small blood effect near the password field for each key."""
