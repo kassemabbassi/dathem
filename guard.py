@@ -6,9 +6,8 @@ import time
 from lock_screen import LockScreen
 
 TOLERANCE = 0.5
-CHECK_INTERVAL = 2          # seconds between checks
 ABSENCE_LOCK_AFTER = 20     # lock if no one detected for this many seconds
-BAD_READINGS_TO_LOCK = 2    # consecutive "unknown present" readings before locking
+READ_ERROR_RETRY = 0.05     # short retry only when the camera fails to return a frame
 LOCK_COOLDOWN = 5           # don't re-trigger lock within this many seconds
 
 # Load enrolled faces
@@ -95,13 +94,15 @@ def trigger_lock(cam):
 
 def main():
     cam = cv2.VideoCapture(0)
+    # Avoid processing frames queued while face recognition is busy; the next
+    # analysis should use the most recent image available from the camera.
+    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not cam.isOpened():
         print("ERROR: Could not open camera")
         return
 
     print("Guard running. Press Ctrl+C to stop.\n")
 
-    consecutive_bad = 0
     absence_start = None
     last_lock_time = 0
 
@@ -109,7 +110,7 @@ def main():
         while True:
             ret, frame = cam.read()
             if not ret:
-                time.sleep(CHECK_INTERVAL)
+                time.sleep(READ_ERROR_RETRY)
                 continue
 
             total, unknown_count, names_seen = analyze_frame(frame)
@@ -124,24 +125,18 @@ def main():
                     cam = trigger_lock(cam)
                     last_lock_time = time.time()
                     absence_start = None
-                consecutive_bad = 0
 
             else:
                 absence_start = None
 
                 if unknown_count > 0:
-                    consecutive_bad += 1
                     print(f"[{time.strftime('%H:%M:%S')}] Faces: {names_seen} "
-                          f"-> unknown present ({consecutive_bad}/{BAD_READINGS_TO_LOCK})")
-                    if consecutive_bad >= BAD_READINGS_TO_LOCK and (now - last_lock_time) > LOCK_COOLDOWN:
+                          "-> unknown present; locking immediately")
+                    if (now - last_lock_time) > LOCK_COOLDOWN:
                         cam = trigger_lock(cam)
                         last_lock_time = time.time()
-                        consecutive_bad = 0
                 else:
-                    consecutive_bad = 0
                     print(f"[{time.strftime('%H:%M:%S')}] Faces: {names_seen} -> OK")
-
-            time.sleep(CHECK_INTERVAL)
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
