@@ -13,23 +13,51 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as SecureStore from 'expo-secure-store';
+import * as Notifications from 'expo-notifications';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import FaceEnrollment from './FaceEnrollment';
+import DathemAgent from './modules/dathem-agent';
 
 const eyes = require('./assets/eyes.jpg');
 const PASSWORD_KEY = 'dathem.guard.password.v1';
+const FACE_VECTOR_KEY = 'dathem.guard.face-vector.v1';
+const GUARD_ACTIVE_KEY = 'dathem.guard.active.v1';
 
 function DathemGuard() {
   const [password, setPassword] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [message, setMessage] = useState('');
   const [saved, setSaved] = useState<boolean | null>(null);
+  const [faceEnrolled, setFaceEnrolled] = useState(false);
+  const [guardActive, setGuardActive] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     let mounted = true;
     SecureStore.getItemAsync(PASSWORD_KEY)
-      .then((value) => {
-        if (mounted) setSaved(value !== null);
+      .then(async (value) => {
+        const faceVector = await SecureStore.getItemAsync(FACE_VECTOR_KEY);
+        const isGuardActive = await SecureStore.getItemAsync(GUARD_ACTIVE_KEY);
+        let restoredGuard = false;
+        if (faceVector !== null && isGuardActive === 'true' && Platform.OS === 'android') {
+          try {
+            const notificationPermission = await Notifications.getPermissionsAsync();
+            if (notificationPermission.granted) {
+              await DathemAgent.start();
+              restoredGuard = true;
+            } else {
+              await SecureStore.setItemAsync(GUARD_ACTIVE_KEY, 'false');
+            }
+          } catch (error) {
+            console.error('[Dathem][Guard] Reprise de l’agent impossible.', error);
+            await SecureStore.setItemAsync(GUARD_ACTIVE_KEY, 'false');
+          }
+        }
+        if (mounted) {
+          setSaved(value !== null);
+          setFaceEnrolled(faceVector !== null);
+          setGuardActive(restoredGuard);
+        }
       })
       .catch(() => {
         if (mounted) {
@@ -57,6 +85,7 @@ function DathemGuard() {
     try {
       await SecureStore.setItemAsync(PASSWORD_KEY, password);
       setSaved(true);
+      setFaceEnrolled(false);
       setPassword('');
       setConfirmation('');
     } catch {
@@ -64,6 +93,31 @@ function DathemGuard() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function updateGuardState(active: boolean) {
+    if (Platform.OS !== 'android') {
+      throw new Error('Le service de garde est disponible uniquement sur Android.');
+    }
+    if (active) {
+      let permission = await Notifications.getPermissionsAsync();
+      if (!permission.granted) permission = await Notifications.requestPermissionsAsync();
+      if (!permission.granted) {
+        throw new Error('Autorise les notifications pour afficher l’agent Dathem actif.');
+      }
+      await DathemAgent.start();
+      try {
+        await SecureStore.setItemAsync(GUARD_ACTIVE_KEY, 'true');
+      } catch (error) {
+        await DathemAgent.stop();
+        throw error;
+      }
+      setGuardActive(true);
+      return;
+    }
+    await DathemAgent.stop();
+    await SecureStore.setItemAsync(GUARD_ACTIVE_KEY, 'false');
+    setGuardActive(false);
   }
 
   return (
@@ -91,14 +145,12 @@ function DathemGuard() {
 
                   {saved ? (
                     <View style={styles.card}>
-                      <View style={styles.statusRow}>
-                        <View style={styles.statusDot} />
-                        <Text style={styles.cardTitle}>Mot de passe enregistré</Text>
-                      </View>
-                      <Text style={styles.description}>
-                        Il est conservé de façon chiffrée sur cet appareil.
-                        La prochaine étape sera l’inscription du visage autorisé.
-                      </Text>
+                      <FaceEnrollment
+                        enrolled={faceEnrolled}
+                        onEnrolled={() => setFaceEnrolled(true)}
+                        guardActive={guardActive}
+                        onGuardChange={updateGuardState}
+                      />
                     </View>
                   ) : (
                     <View style={styles.card}>
