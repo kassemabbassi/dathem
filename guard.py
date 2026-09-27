@@ -3,12 +3,86 @@ import face_recognition
 import pickle
 import numpy as np
 import time
+import threading
+import queue
+import tkinter as tk
 from lock_screen import LockScreen
 
 TOLERANCE = 0.5
 ABSENCE_LOCK_AFTER = 20     # lock if no one detected for this many seconds
 READ_ERROR_RETRY = 0.05     # short retry only when the camera fails to return a frame
 LOCK_COOLDOWN = 5           # don't re-trigger lock within this many seconds
+NOTIFICATION_SECONDS = 5000  # milliseconds
+
+
+class CompanionNotifier:
+    """Show a small, non-blocking Windows desktop notification via Tk."""
+    def __init__(self):
+        self.messages = queue.Queue()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def show(self, message):
+        self.messages.put(message)
+
+    def _run(self):
+        try:
+            root = tk.Tk()
+            root.withdraw()
+        except tk.TclError as exc:
+            print(f"WARNING: Could not start desktop notifications: {exc}")
+            return
+
+        current = {"window": None, "after_id": None}
+
+        def close_current():
+            window = current["window"]
+            current["window"] = None
+            current["after_id"] = None
+            if window is not None:
+                try:
+                    if window.winfo_exists():
+                        window.destroy()
+                except tk.TclError:
+                    pass
+
+        def poll():
+            try:
+                message = self.messages.get_nowait()
+            except queue.Empty:
+                message = None
+
+            if message:
+                if current["after_id"] is not None:
+                    try:
+                        root.after_cancel(current["after_id"])
+                    except tk.TclError:
+                        pass
+                close_current()
+
+                window = tk.Toplevel(root)
+                window.overrideredirect(True)
+                window.attributes("-topmost", True)
+                window.configure(bg="#171717")
+                tk.Label(
+                    window, text="Présence détectée", bg="#171717", fg="#ff4040",
+                    font=("Segoe UI", 12, "bold"), padx=18, pady=4
+                ).pack(anchor="w", pady=(10, 0))
+                tk.Label(
+                    window, text=message, bg="#171717", fg="white",
+                    font=("Segoe UI", 10), padx=18, pady=4
+                ).pack(anchor="w")
+                window.update_idletasks()
+                x = root.winfo_screenwidth() - window.winfo_reqwidth() - 24
+                y = root.winfo_screenheight() - window.winfo_reqheight() - 60
+                window.geometry(f"+{x}+{y}")
+                current["window"] = window
+                current["after_id"] = root.after(
+                    NOTIFICATION_SECONDS, close_current
+                )
+            root.after(100, poll)
+
+        root.after(100, poll)
+        root.mainloop()
 
 # Load enrolled faces
 with open("encodings.pkl", "rb") as f:
@@ -30,7 +104,7 @@ def lock_windows():
     moment so the caller can grant this person session-level trust.
     Returns None if no face could be captured (encoding stays untrusted)."""
     print(">>> TRIGGERING LOCK SCREEN <<<")
-    screen = LockScreen()
+    screen = LockScreen(known_encodings=known_encodings, tolerance=TOLERANCE)
     return screen.captured_encoding
 
 
@@ -103,6 +177,8 @@ def main():
 
     print("Guard running. Press Ctrl+C to stop.\n")
 
+    notifier = CompanionNotifier()
+    companion_present = False
     absence_start = None
     last_lock_time = 0
 
@@ -117,6 +193,7 @@ def main():
             now = time.time()
 
             if total == 0:
+                companion_present = False
                 if absence_start is None:
                     absence_start = now
                 elapsed = now - absence_start
@@ -128,14 +205,24 @@ def main():
 
             else:
                 absence_start = None
+                has_unknown = unknown_count > 0
+                has_known = any(name != "unknown" for name in names_seen)
 
-                if unknown_count > 0:
+                if has_unknown and has_known:
+                    if not companion_present:
+                        notifier.show("Une autre personne est détectée devant votre PC.")
+                        print(f"[{time.strftime('%H:%M:%S')}] Faces: {names_seen} "
+                              "-> known and unknown together; notification only")
+                    companion_present = True
+                elif has_unknown:
+                    companion_present = False
                     print(f"[{time.strftime('%H:%M:%S')}] Faces: {names_seen} "
                           "-> unknown present; locking immediately")
                     if (now - last_lock_time) > LOCK_COOLDOWN:
                         cam = trigger_lock(cam)
                         last_lock_time = time.time()
                 else:
+                    companion_present = False
                     print(f"[{time.strftime('%H:%M:%S')}] Faces: {names_seen} -> OK")
 
     except KeyboardInterrupt:

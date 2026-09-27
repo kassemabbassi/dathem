@@ -4,15 +4,21 @@ import math
 import os
 import cv2
 import face_recognition
+import numpy as np
 from PIL import Image, ImageTk, ImageEnhance
 
-PASSWORD = "kassem030903"
+PASSWORD = "kassem"
 EYES_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eyes.jpg")
 
 
 class LockScreen:
-    def __init__(self):
+    def __init__(self, known_encodings=None, tolerance=0.5):
         self.root = tk.Tk()
+        # There is a separate Tk root for desktop notifications. Bind every
+        # Tk variable to this window's interpreter explicitly.
+        self.known_encodings = list(known_encodings or [])
+        self.tolerance = tolerance
+        self.unlock_cam = None
         self.width = self.root.winfo_screenwidth()
         self.height = self.root.winfo_screenheight()
 
@@ -102,10 +108,10 @@ class LockScreen:
             self.static_ids.append(sid)
 
         # --- Password field, positioned low so the eyes stay fully visible above it ---
-        self.pw_var = tk.StringVar()
+        self.pw_var = tk.StringVar(master=self.root)
         self.entry = tk.Entry(
             self.root, textvariable=self.pw_var,
-            show=" ", font=("Consolas", 22),
+            show="", font=("Consolas", 22),
             bg="black", fg="red", insertbackground="red",
             relief="flat", justify="center", width=20,
             highlightthickness=2, highlightbackground="#8B0000", highlightcolor="#FF0000"
@@ -153,6 +159,15 @@ class LockScreen:
         self.animate()
 
         self.root.after(100, self.refocus)
+        if self.known_encodings:
+            self.unlock_cam = cv2.VideoCapture(0)
+            self.unlock_cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if self.unlock_cam.isOpened():
+                self.root.after(250, self.check_authorized_face)
+            else:
+                self.unlock_cam.release()
+                self.unlock_cam = None
+                print("WARNING: Camera unavailable for automatic face unlock.")
         self.root.mainloop()
 
     # ---------- background image ----------
@@ -187,7 +202,10 @@ class LockScreen:
         for level in levels:
             enhancer = ImageEnhance.Brightness(img)
             variant = enhancer.enhance(level)
-            variants.append(ImageTk.PhotoImage(variant))
+            # The companion notification owns another Tk root on its own
+            # thread. Bind these images explicitly to the lock screen root;
+            # otherwise Tk may register them with the wrong interpreter.
+            variants.append(ImageTk.PhotoImage(variant, master=self.root))
         return variants
 
     # ---------- static decoration builders ----------
@@ -229,8 +247,12 @@ class LockScreen:
 
     def refocus(self):
         if self.password_ready:
-            self.entry.focus_force()
+            self.focus_password()
         self.root.after(500, self.refocus)
+
+    def focus_password(self):
+        if self.password_ready and self.entry.winfo_exists():
+            self.entry.focus_force()
 
     # ---------- sequence challenge ----------
 
@@ -302,6 +324,8 @@ class LockScreen:
         if self.game_locked:
             return
         index = len(self.game_input)
+        if index >= len(self.game_sequence):
+            return
         if symbol != self.game_sequence[index]:
             self.game_locked = True
             self.canvas.itemconfigure(self.game_prompt, text="Wrong sequence · try this round again")
@@ -316,6 +340,9 @@ class LockScreen:
             self.root.after(650, self.next_game_round)
 
     def replay_game_round(self):
+        # A replay starts from the first symbol. Keeping the previous partial
+        # input made the next click compare against the wrong sequence index.
+        self.game_input = []
         self.canvas.itemconfigure(self.game_prompt, text="Watch carefully…")
         self.show_sequence(0)
 
@@ -332,7 +359,8 @@ class LockScreen:
         self.canvas.itemconfigure(self.game_status, state="hidden")
         self.canvas.itemconfigure(self.game_prompt, state="hidden")
         self.canvas.itemconfigure(self.game_display, state="hidden")
-        self.entry.focus_force()
+        self.root.after_idle(self.focus_password)
+        self.root.after(150, self.focus_password)
 
     def on_password_keypress(self, event):
         """Flash a small blood effect near the password field for each key."""
@@ -442,16 +470,59 @@ class LockScreen:
     # ---------- password check ----------
 
     def check_password(self, event=None):
-        if self.pw_var.get() == PASSWORD:
+        if not self.password_ready:
+            return "break"
+
+        entered = self.pw_var.get().strip()
+        if entered.casefold() == PASSWORD.casefold():
             self.captured_encoding = self.capture_face()
+            self.release_unlock_camera()
             self.root.destroy()
         else:
             self.flash_wrong()
             self.pw_var.set("")
+            self.canvas.itemconfigure(
+                self.hint_id, text="Incorrect password. Try again.", fill="#FF4444"
+            )
+            self.entry.focus_force()
+        return "break"
+
+    def release_unlock_camera(self):
+        if self.unlock_cam is not None:
+            self.unlock_cam.release()
+            self.unlock_cam = None
+
+    def check_authorized_face(self):
+        """Unlock when an enrolled or session-trusted face returns."""
+        if self.unlock_cam is None or not self.root.winfo_exists():
+            return
+
+        ret, frame = self.unlock_cam.read()
+        if ret:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            locations = face_recognition.face_locations(rgb, model="hog")
+            encodings = face_recognition.face_encodings(rgb, locations)
+            for encoding in encodings:
+                distances = face_recognition.face_distance(
+                    self.known_encodings, encoding
+                )
+                if len(distances) and float(np.min(distances)) <= self.tolerance:
+                    print(">>> Authorized face recognized; unlocking automatically <<<")
+                    self.captured_encoding = encoding
+                    self.release_unlock_camera()
+                    self.root.destroy()
+                    return
+
+        self.root.after(250, self.check_authorized_face)
 
     def capture_face(self):
-        cam = cv2.VideoCapture(0)
         encoding = None
+        cam = self.unlock_cam
+        if cam is None:
+            cam = cv2.VideoCapture(0)
+            should_release = True
+        else:
+            should_release = False
         if cam.isOpened():
             for _ in range(6):
                 ret, frame = cam.read()
@@ -464,7 +535,8 @@ class LockScreen:
                     if encs:
                         encoding = encs[0]
                         break
-        cam.release()
+        if should_release:
+            cam.release()
         return encoding
 
     def flash_wrong(self):
