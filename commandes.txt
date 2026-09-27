@@ -1,0 +1,10 @@
+Pour démarrer le service manuellement :
+
+sc.exe start Dathem
+sc.exe query Dathem
+
+Pour l’arrêter et fermer aussi l’agent :
+
+sc.exe stop Dathem
+taskkill.exe /IM DathemAgent.exe /F
+sc.exe query Dathem

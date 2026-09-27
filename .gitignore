@@ -1,3 +1,5 @@
 venv/
 dathem-mobile/node_modules/
 dathem-mobile/.expo/
+build/
+dist/

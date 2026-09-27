@@ -6,7 +6,28 @@ import time
 import threading
 import queue
 import tkinter as tk
+import os
+import sys
 from lock_screen import LockScreen
+
+
+def configure_frozen_logging():
+    """Keep diagnostics available when the agent is built without a console."""
+    if not getattr(sys, "frozen", False) or (sys.stdout is not None and sys.stderr is not None):
+        return
+
+    log_root = os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "FaceGuard"
+    )
+    os.makedirs(log_root, exist_ok=True)
+    log_stream = open(
+        os.path.join(log_root, "agent.log"), "a", encoding="utf-8", buffering=1
+    )
+    sys.stdout = log_stream
+    sys.stderr = log_stream
+
+
+configure_frozen_logging()
 
 TOLERANCE = 0.5
 ABSENCE_LOCK_AFTER = 20     # lock if no one detected for this many seconds
@@ -84,8 +105,11 @@ class CompanionNotifier:
         root.after(100, poll)
         root.mainloop()
 
-# Load enrolled faces
-with open("encodings.pkl", "rb") as f:
+# Load enrolled faces relative to this program, not the caller's current folder.
+BASE_DIR = getattr(
+    sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))
+)
+with open(os.path.join(BASE_DIR, "encodings.pkl"), "rb") as f:
     data = pickle.load(f)
 
 known_names = []
