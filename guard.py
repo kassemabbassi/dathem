@@ -1,14 +1,15 @@
 import cv2
 import face_recognition
-import pickle
 import numpy as np
 import time
 import threading
 import queue
 import tkinter as tk
+from tkinter import messagebox
 import os
 import sys
 from lock_screen import LockScreen
+from dathem_config import load_profile, verify_password
 
 
 def configure_frozen_logging():
@@ -17,7 +18,7 @@ def configure_frozen_logging():
         return
 
     log_root = os.path.join(
-        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "FaceGuard"
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "DathemAgentV1"
     )
     os.makedirs(log_root, exist_ok=True)
     log_stream = open(
@@ -105,21 +106,16 @@ class CompanionNotifier:
         root.after(100, poll)
         root.mainloop()
 
-# Load enrolled faces relative to this program, not the caller's current folder.
-BASE_DIR = getattr(
-    sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))
-)
-with open(os.path.join(BASE_DIR, "encodings.pkl"), "rb") as f:
-    data = pickle.load(f)
-
+profile = load_profile()
 known_names = []
 known_encodings = []
-for name, samples in data.items():
-    for enc in samples:
-        known_names.append(name)
-        known_encodings.append(enc)
-
-print(f"Loaded {len(known_encodings)} samples for: {list(data.keys())}")
+if profile is not None:
+    for encoding in profile["encodings"]:
+        known_names.append(profile["name"])
+        known_encodings.append(np.asarray(encoding, dtype=float))
+    print(f"Loaded {len(known_encodings)} samples for: {profile['name']}")
+else:
+    print("DATHEM profile not found. Run DathemAgentV1Setup.exe first.")
 
 
 def lock_windows():
@@ -128,7 +124,11 @@ def lock_windows():
     moment so the caller can grant this person session-level trust.
     Returns None if no face could be captured (encoding stays untrusted)."""
     print(">>> TRIGGERING LOCK SCREEN <<<")
-    screen = LockScreen(known_encodings=known_encodings, tolerance=TOLERANCE)
+    screen = LockScreen(
+        known_encodings=known_encodings,
+        tolerance=TOLERANCE,
+        password_verifier=lambda candidate: verify_password(candidate, profile),
+    )
     return screen.captured_encoding
 
 
@@ -191,6 +191,17 @@ def trigger_lock(cam):
 
 
 def main():
+    if profile is None:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "DATHEM Agent V1 non configuré",
+            "Lancez DathemAgentV1Setup.exe et enregistrez le profil de l'utilisateur avant de démarrer le service.",
+            parent=root,
+        )
+        root.destroy()
+        return
+
     cam = cv2.VideoCapture(0)
     # Avoid processing frames queued while face recognition is busy; the next
     # analysis should use the most recent image available from the camera.

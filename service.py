@@ -1,6 +1,6 @@
-"""Windows service that supervises the interactive Face Guard agent.
+"""Windows service that supervises the interactive DATHEM Agent V1.
 
-The service runs in Session 0. It must therefore launch guard.exe in the
+The service runs in Session 0. It must therefore launch the desktop agent in the
 active user's session; the camera and DATHEM Tkinter screen stay in that
 interactive process.
 """
@@ -22,8 +22,8 @@ import win32ts
 import servicemanager
 
 
-SERVICE_NAME = "Dathem"
-AGENT_EXE = os.path.join("DathemAgent", "DathemAgent.exe")
+SERVICE_NAME = "DathemAgentV1"
+AGENT_EXE = os.path.join("DathemAgentV1Agent", "DathemAgentV1Agent.exe")
 POLL_SECONDS = 3
 RESTART_DELAY_SECONDS = 5
 EXIT_CODE_STILL_ACTIVE = 259
@@ -32,7 +32,17 @@ INVALID_SESSION_ID = 0xFFFFFFFF
 
 def application_directory():
     if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
+        executable_directory = os.path.dirname(os.path.abspath(sys.executable))
+        # In a distributable onedir build, PyInstaller places the service
+        # executable in its own subdirectory while the desktop agent sits in
+        # the package root beside that directory. Keep supporting the earlier
+        # onefile layout where both are directly in the package root.
+        if os.path.isdir(os.path.join(executable_directory, "DathemAgentV1Agent")):
+            return executable_directory
+        package_directory = os.path.dirname(executable_directory)
+        if os.path.isdir(os.path.join(package_directory, "DathemAgentV1Agent")):
+            return package_directory
+        return executable_directory
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -45,11 +55,11 @@ def active_console_session_id():
     return int(session_id)
 
 
-class FaceGuardService(win32serviceutil.ServiceFramework):
+class DathemAgentV1Service(win32serviceutil.ServiceFramework):
     _svc_name_ = SERVICE_NAME
-    _svc_display_name_ = "Dathem"
+    _svc_display_name_ = "DATHEM Agent V1"
     _svc_description_ = (
-        "Supervises the DATHEM desktop agent in the active user session."
+        "Supervises the DATHEM Agent V1 desktop agent in the active user session."
     )
 
     def __init__(self, args):
@@ -57,6 +67,7 @@ class FaceGuardService(win32serviceutil.ServiceFramework):
         self.stop_event = win32event.CreateEvent(None, 0, 0, None)
         self.agent_process = None
         self.agent_session_id = None
+        self.profile_warning_session = None
 
     def SvcStop(self):
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
@@ -96,6 +107,19 @@ class FaceGuardService(win32serviceutil.ServiceFramework):
         try:
             token = win32ts.WTSQueryUserToken(session_id)
             environment = win32profile.CreateEnvironmentBlock(token, False)
+            local_app_data = environment.get("LOCALAPPDATA") or environment.get("USERPROFILE")
+            profile_path = os.path.join(
+                local_app_data, "DathemAgentV1", "profile.json"
+            ) if local_app_data else None
+            if profile_path is None or not os.path.isfile(profile_path):
+                if self.profile_warning_session != session_id:
+                    logging.warning(
+                        "No DATHEM profile for session %s; run DathemAgentV1Setup.exe first",
+                        session_id,
+                    )
+                    self.profile_warning_session = session_id
+                return
+            self.profile_warning_session = None
             startup = win32process.STARTUPINFO()
             startup.lpDesktop = r"winsta0\default"
             command_line = '"{}"'.format(agent_path)
@@ -127,7 +151,7 @@ class FaceGuardService(win32serviceutil.ServiceFramework):
                         logging.exception("Could not close a launch handle")
     def SvcDoRun(self):
         logging.basicConfig(
-            filename=os.path.join(application_directory(), "service.log"),
+            filename=os.path.join(application_directory(), "DathemAgentV1-service.log"),
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(message)s",
         )
@@ -170,7 +194,7 @@ if __name__ == "__main__":
         # command-line verb used for install/start/stop. Enter the native
         # service dispatcher explicitly in that case.
         servicemanager.Initialize()
-        servicemanager.PrepareToHostSingle(FaceGuardService)
+        servicemanager.PrepareToHostSingle(DathemAgentV1Service)
         servicemanager.StartServiceCtrlDispatcher()
     else:
-        win32serviceutil.HandleCommandLine(FaceGuardService)
+        win32serviceutil.HandleCommandLine(DathemAgentV1Service)

@@ -7,17 +7,17 @@ import face_recognition
 import numpy as np
 from PIL import Image, ImageTk, ImageEnhance
 
-PASSWORD = "kassem"
 EYES_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eyes.jpg")
 
 
 class LockScreen:
-    def __init__(self, known_encodings=None, tolerance=0.5):
+    def __init__(self, known_encodings=None, tolerance=0.5, password_verifier=None):
         self.root = tk.Tk()
         # There is a separate Tk root for desktop notifications. Bind every
         # Tk variable to this window's interpreter explicitly.
         self.known_encodings = list(known_encodings or [])
         self.tolerance = tolerance
+        self.password_verifier = password_verifier
         self.unlock_cam = None
         self.width = self.root.winfo_screenwidth()
         self.height = self.root.winfo_screenheight()
@@ -474,7 +474,7 @@ class LockScreen:
             return "break"
 
         entered = self.pw_var.get().strip()
-        if entered.casefold() == PASSWORD.casefold():
+        if self.password_verifier is not None and self.password_verifier(entered):
             self.captured_encoding = self.capture_face()
             self.release_unlock_camera()
             self.root.destroy()
