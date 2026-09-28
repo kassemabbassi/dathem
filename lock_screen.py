@@ -2,16 +2,20 @@ import tkinter as tk
 import random
 import math
 import os
+import queue
+import threading
+import time
 import cv2
 import face_recognition
 import numpy as np
-from PIL import Image, ImageTk, ImageEnhance
+from PIL import Image, ImageTk
 
 EYES_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eyes.jpg")
 
 
 class LockScreen:
     def __init__(self, known_encodings=None, tolerance=0.5, password_verifier=None):
+        init_started = time.perf_counter()
         self.root = tk.Tk()
         # There is a separate Tk root for desktop notifications. Bind every
         # Tk variable to this window's interpreter explicitly.
@@ -19,6 +23,11 @@ class LockScreen:
         self.tolerance = tolerance
         self.password_verifier = password_verifier
         self.unlock_cam = None
+        self._face_stop = threading.Event()
+        self._face_results = queue.Queue(maxsize=1)
+        self._face_state_lock = threading.Lock()
+        self._last_face_encoding = None
+        self._face_worker = None
         self.width = self.root.winfo_screenwidth()
         self.height = self.root.winfo_screenheight()
 
@@ -36,16 +45,34 @@ class LockScreen:
         self.canvas = tk.Canvas(self.root, width=self.width, height=self.height,
                                  bg='black', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True)
+        self._transition_items = [
+            self.canvas.create_text(
+                self.width // 2, int(self.height * 0.43),
+                text="DATHEM — ACCÈS BLOQUÉ",
+                font=("Segoe UI", 38, "bold"), fill="#FF1A1A",
+            ),
+            self.canvas.create_text(
+                self.width // 2, int(self.height * 0.50),
+                text="PRÉSENCE NON AUTORISÉE DÉTECTÉE",
+                font=("Consolas", 18, "bold"), fill="#D62828",
+            ),
+        ]
+        # Paint the full-screen lock surface before loading large images and
+        # building decorative canvas items, so the lock appears immediately.
+        self.root.update_idletasks()
+        self.root.update()
+        print(
+            f"PERF lock surface displayed: "
+            f"{(time.perf_counter() - init_started) * 1000:.0f} ms"
+        )
 
-        # --- Eyes background: cover the whole screen, then precompute a few
-        #     brightness levels so the eyes appear to "glow"/breathe over time ---
-        self.bg_variants = self.load_eyes_background()
-        self.bg_index = 0
-        self.bg_dir = 1
-        if self.bg_variants:
+        # --- Eyes background: cover the whole screen with one cached image ---
+        self.bg_image = self.load_eyes_background()
+        if self.bg_image:
             self.bg_image_id = self.canvas.create_image(
-                0, 0, image=self.bg_variants[len(self.bg_variants) // 2], anchor="nw"
+                0, 0, image=self.bg_image, anchor="nw"
             )
+            self.canvas.tag_lower(self.bg_image_id)
         else:
             self.bg_image_id = None
 
@@ -100,7 +127,7 @@ class LockScreen:
 
         # --- Flickering static noise specks over the whole screen ---
         self.static_ids = []
-        for _ in range(50):
+        for _ in range(24):
             x = random.randint(0, self.width)
             y = random.randint(0, self.height)
             s = random.randint(1, 3)
@@ -135,7 +162,7 @@ class LockScreen:
         # --- Falling blood-rain across the whole screen ---
         self.rain = []
         rain_colors = ["#6B0000", "#8B0000", "#A80000", "#5C0000"]
-        for _ in range(70):
+        for _ in range(36):
             x = random.randint(0, self.width)
             y = random.randint(-self.height, 0)
             length = random.randint(12, 60)
@@ -155,20 +182,25 @@ class LockScreen:
         self.flicker_state = 0
         self.pulse_dir = 1
         self.pulse_width = 6
-        self.bg_pulse_counter = 0
         self.animate()
 
         self.root.after(100, self.refocus)
+        for item_id in self._transition_items:
+            self.canvas.delete(item_id)
         if self.known_encodings:
-            self.unlock_cam = cv2.VideoCapture(0)
-            self.unlock_cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            if self.unlock_cam.isOpened():
-                self.root.after(250, self.check_authorized_face)
-            else:
-                self.unlock_cam.release()
-                self.unlock_cam = None
-                print("WARNING: Camera unavailable for automatic face unlock.")
+            self._face_worker = threading.Thread(
+                target=self._face_recognition_worker, daemon=True
+            )
+            self._face_worker.start()
+            self.root.after(40, self.poll_authorized_face)
+        elif self.known_encodings:
+            print("WARNING: Camera unavailable for automatic face unlock.")
+        print(
+            f"PERF lock-screen content ready: "
+            f"{(time.perf_counter() - init_started) * 1000:.0f} ms"
+        )
         self.root.mainloop()
+        self.stop_face_worker()
 
     # ---------- background image ----------
 
@@ -196,17 +228,9 @@ class LockScreen:
         top = (new_height - self.height) // 2
         img = img.crop((left, top, left + self.width, top + self.height))
 
-        # Precompute a handful of brightness levels for a slow "breathing glow"
-        levels = [0.55, 0.75, 1.0, 1.3, 1.6, 1.3, 1.0, 0.75]
-        variants = []
-        for level in levels:
-            enhancer = ImageEnhance.Brightness(img)
-            variant = enhancer.enhance(level)
-            # The companion notification owns another Tk root on its own
-            # thread. Bind these images explicitly to the lock screen root;
-            # otherwise Tk may register them with the wrong interpreter.
-            variants.append(ImageTk.PhotoImage(variant, master=self.root))
-        return variants
+        # Keep one screen-sized image. Creating several full-resolution
+        # brightness variants delayed lock display and consumed substantial RAM.
+        return ImageTk.PhotoImage(img, master=self.root)
 
     # ---------- static decoration builders ----------
 
@@ -401,13 +425,6 @@ class LockScreen:
     def animate(self):
         self.flicker_state += 1
 
-        # Pulse the eyes' brightness slowly (breathing glow), independent of the
-        # faster title flicker
-        self.bg_pulse_counter += 1
-        if self.bg_variants and self.bg_pulse_counter % 6 == 0:
-            self.bg_index = (self.bg_index + 1) % len(self.bg_variants)
-            self.canvas.itemconfig(self.bg_image_id, image=self.bg_variants[self.bg_index])
-
         colors = ["#8B0000", "#B22222", "#FF1A1A", "#8B0000", "#5C0000", "#FF0000", "#FF4500"]
         self.canvas.itemconfig(self.title_id, fill=colors[self.flicker_state % len(colors)])
 
@@ -475,8 +492,14 @@ class LockScreen:
 
         entered = self.pw_var.get().strip()
         if self.password_verifier is not None and self.password_verifier(entered):
-            self.captured_encoding = self.capture_face()
-            self.release_unlock_camera()
+            # The camera worker continuously keeps the latest observed face;
+            # reuse it rather than blocking the UI for another capture pass.
+            with self._face_state_lock:
+                self.captured_encoding = (
+                    self._last_face_encoding.copy()
+                    if self._last_face_encoding is not None else None
+                )
+            self._face_stop.set()
             self.root.destroy()
         else:
             self.flash_wrong()
@@ -492,52 +515,88 @@ class LockScreen:
             self.unlock_cam.release()
             self.unlock_cam = None
 
-    def check_authorized_face(self):
-        """Unlock when an enrolled or session-trusted face returns."""
-        if self.unlock_cam is None or not self.root.winfo_exists():
-            return
-
-        ret, frame = self.unlock_cam.read()
-        if ret:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            locations = face_recognition.face_locations(rgb, model="hog")
-            encodings = face_recognition.face_encodings(rgb, locations)
-            for encoding in encodings:
-                distances = face_recognition.face_distance(
-                    self.known_encodings, encoding
-                )
-                if len(distances) and float(np.min(distances)) <= self.tolerance:
-                    print(">>> Authorized face recognized; unlocking automatically <<<")
-                    self.captured_encoding = encoding
-                    self.release_unlock_camera()
-                    self.root.destroy()
-                    return
-
-        self.root.after(250, self.check_authorized_face)
-
-    def capture_face(self):
-        encoding = None
-        cam = self.unlock_cam
-        if cam is None:
-            cam = cv2.VideoCapture(0)
-            should_release = True
-        else:
-            should_release = False
+    def _face_recognition_worker(self):
+        """Read and recognize camera frames without blocking Tk's event loop."""
+        # Opening the camera can block on some Windows drivers. Do it away from
+        # Tk so the lock surface remains visible while the device initializes.
+        cam = cv2.VideoCapture(0)
+        self.unlock_cam = cam
         if cam.isOpened():
-            for _ in range(6):
+            cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        else:
+            cam.release()
+            self.unlock_cam = None
+            print("WARNING: Camera unavailable for automatic face unlock.")
+            return
+        try:
+            while cam is not None and not self._face_stop.is_set():
                 ret, frame = cam.read()
                 if not ret:
+                    self._face_stop.wait(0.05)
                     continue
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                locations = face_recognition.face_locations(rgb, model="hog")
-                if locations:
-                    encs = face_recognition.face_encodings(rgb, locations)
-                    if encs:
-                        encoding = encs[0]
-                        break
-        if should_release:
-            cam.release()
-        return encoding
+
+                small = cv2.resize(
+                    frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA
+                )
+                rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+                locations = face_recognition.face_locations(
+                    rgb, number_of_times_to_upsample=0, model="hog"
+                )
+                encodings = face_recognition.face_encodings(
+                    rgb, locations, num_jitters=1
+                )
+
+                for encoding in encodings:
+                    encoding = np.asarray(encoding).copy()
+                    with self._face_state_lock:
+                        self._last_face_encoding = encoding
+                    distances = face_recognition.face_distance(
+                        self.known_encodings, encoding
+                    )
+                    if len(distances) and float(np.min(distances)) <= self.tolerance:
+                        try:
+                            self._face_results.put_nowait(encoding)
+                        except queue.Full:
+                            pass
+                        return
+
+                # Limit background CPU use while checking often enough for a
+                # responsive face unlock. Tk remains free to animate meanwhile.
+                self._face_stop.wait(0.15)
+        except Exception as exc:
+            print(f"WARNING: Face recognition worker failed: {exc}")
+        finally:
+            if cam is not None:
+                cam.release()
+            self.unlock_cam = None
+
+    def poll_authorized_face(self):
+        """Apply a worker recognition result on Tk's main thread."""
+        if not self.root.winfo_exists():
+            return
+        try:
+            encoding = self._face_results.get_nowait()
+        except queue.Empty:
+            self.root.after(40, self.poll_authorized_face)
+            return
+
+        print(">>> Authorized face recognized; unlocking automatically <<<")
+        self.captured_encoding = encoding
+        self._face_stop.set()
+        self.root.destroy()
+
+    def stop_face_worker(self):
+        self._face_stop.set()
+        worker = self._face_worker
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=2.0)
+            if worker.is_alive():
+                self.release_unlock_camera()
+                worker.join(timeout=1.0)
+        if worker is None or not worker.is_alive():
+            self.release_unlock_camera()
 
     def flash_wrong(self):
         self.canvas.itemconfig(self.overlay_id, fill="#5a0000")

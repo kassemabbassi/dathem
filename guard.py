@@ -35,6 +35,8 @@ ABSENCE_LOCK_AFTER = 20     # lock if no one detected for this many seconds
 READ_ERROR_RETRY = 0.05     # short retry only when the camera fails to return a frame
 LOCK_COOLDOWN = 5           # don't re-trigger lock within this many seconds
 NOTIFICATION_SECONDS = 5000  # milliseconds
+ANALYSIS_SCALE = 0.5        # run HOG detection on a half-size frame
+STATUS_LOG_INTERVAL = 10    # keep frozen-build disk logging off the hot path
 
 
 class CompanionNotifier:
@@ -101,9 +103,9 @@ class CompanionNotifier:
                 current["after_id"] = root.after(
                     NOTIFICATION_SECONDS, close_current
                 )
-            root.after(100, poll)
+            root.after(25, poll)
 
-        root.after(100, poll)
+        root.after(25, poll)
         root.mainloop()
 
 profile = load_profile()
@@ -133,9 +135,19 @@ def lock_windows():
 
 
 def analyze_frame(frame):
+    # Face detection and encoding dominate CPU time. Processing half-size
+    # frames cuts the pixel work substantially while retaining enough detail
+    # for ordinary webcam distances.
+    if ANALYSIS_SCALE != 1.0:
+        frame = cv2.resize(
+            frame, None, fx=ANALYSIS_SCALE, fy=ANALYSIS_SCALE,
+            interpolation=cv2.INTER_AREA,
+        )
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    locations = face_recognition.face_locations(rgb, model="hog")
-    encodings = face_recognition.face_encodings(rgb, locations)
+    locations = face_recognition.face_locations(
+        rgb, number_of_times_to_upsample=0, model="hog"
+    )
+    encodings = face_recognition.face_encodings(rgb, locations, num_jitters=1)
 
     total = len(encodings)
     unknown_count = 0
@@ -170,6 +182,14 @@ def grant_session_trust(encoding):
     print(">>> Session trust granted to the person who unlocked the screen <<<")
 
 
+def open_camera():
+    cam = cv2.VideoCapture(0)
+    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cam
+
+
 def trigger_lock(cam):
     """Releases the main-loop camera handle before showing the lock
     screen (which needs its own exclusive access to the webcam to
@@ -183,7 +203,7 @@ def trigger_lock(cam):
     grant_session_trust(captured)
 
     print(">>> Reopening camera after unlock...")
-    new_cam = cv2.VideoCapture(0)
+    new_cam = open_camera()
     if not new_cam.isOpened():
         print("WARNING: Could not reopen camera after unlock. "
               "Guard will keep retrying.")
@@ -202,7 +222,9 @@ def main():
         root.destroy()
         return
 
-    cam = cv2.VideoCapture(0)
+    # Ask the webcam for a modest frame size. Some drivers ignore these hints;
+    # the half-size analysis above still limits recognition work in that case.
+    cam = open_camera()
     # Avoid processing frames queued while face recognition is busy; the next
     # analysis should use the most recent image available from the camera.
     cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -216,6 +238,16 @@ def main():
     companion_present = False
     absence_start = None
     last_lock_time = 0
+    last_status = None
+    last_status_log_time = 0.0
+    last_analysis_timing_log = 0.0
+
+    def report_status(status, now):
+        nonlocal last_status, last_status_log_time
+        if status != last_status or now - last_status_log_time >= STATUS_LOG_INTERVAL:
+            print(f"[{time.strftime('%H:%M:%S')}] {status}")
+            last_status = status
+            last_status_log_time = now
 
     try:
         while True:
@@ -224,7 +256,9 @@ def main():
                 time.sleep(READ_ERROR_RETRY)
                 continue
 
+            analysis_started = time.perf_counter()
             total, unknown_count, names_seen = analyze_frame(frame)
+            analysis_ms = (time.perf_counter() - analysis_started) * 1000
             now = time.time()
 
             if total == 0:
@@ -232,7 +266,7 @@ def main():
                 if absence_start is None:
                     absence_start = now
                 elapsed = now - absence_start
-                print(f"[{time.strftime('%H:%M:%S')}] No one detected ({elapsed:.0f}s)")
+                report_status("No one detected", now)
                 if elapsed >= ABSENCE_LOCK_AFTER and (now - last_lock_time) > LOCK_COOLDOWN:
                     cam = trigger_lock(cam)
                     last_lock_time = time.time()
@@ -246,19 +280,23 @@ def main():
                 if has_unknown and has_known:
                     if not companion_present:
                         notifier.show("Une autre personne est détectée devant votre PC.")
-                        print(f"[{time.strftime('%H:%M:%S')}] Faces: {names_seen} "
-                              "-> known and unknown together; notification only")
+                        report_status(
+                            f"Faces: {names_seen} -> known and unknown together; notification only",
+                            now,
+                        )
                     companion_present = True
                 elif has_unknown:
                     companion_present = False
-                    print(f"[{time.strftime('%H:%M:%S')}] Faces: {names_seen} "
-                          "-> unknown present; locking immediately")
+                    if now - last_analysis_timing_log >= 5:
+                        print(f"PERF face analysis before unknown lock: {analysis_ms:.0f} ms")
+                        last_analysis_timing_log = now
+                    report_status(f"Faces: {names_seen} -> unknown present; locking immediately", now)
                     if (now - last_lock_time) > LOCK_COOLDOWN:
                         cam = trigger_lock(cam)
                         last_lock_time = time.time()
                 else:
                     companion_present = False
-                    print(f"[{time.strftime('%H:%M:%S')}] Faces: {names_seen} -> OK")
+                    report_status(f"Faces: {names_seen} -> OK", now)
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
