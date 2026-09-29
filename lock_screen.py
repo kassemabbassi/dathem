@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 EYES_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eyes.jpg")
+_EYES_BACKGROUND_CACHE = {}
 
 
 class LockScreen:
@@ -67,7 +68,12 @@ class LockScreen:
         )
 
         # --- Eyes background: cover the whole screen with one cached image ---
+        background_started = time.perf_counter()
         self.bg_image = self.load_eyes_background()
+        print(
+            f"PERF lock background ready: "
+            f"{(time.perf_counter() - background_started) * 1000:.0f} ms"
+        )
         if self.bg_image:
             self.bg_image_id = self.canvas.create_image(
                 0, 0, image=self.bg_image, anchor="nw"
@@ -209,24 +215,29 @@ class LockScreen:
             print(f"WARNING: {EYES_IMAGE_PATH} not found - running without eyes background.")
             return []
 
-        img = Image.open(EYES_IMAGE_PATH).convert("RGB")
+        cache_key = (self.width, self.height)
+        img = _EYES_BACKGROUND_CACHE.get(cache_key)
+        if img is None:
+            img = Image.open(EYES_IMAGE_PATH).convert("RGB")
 
-        # Cover-fit: scale so the image fully covers the screen, then center-crop
-        img_ratio = img.width / img.height
-        screen_ratio = self.width / self.height
+            # Cover-fit: scale so the image fully covers the screen, then center-crop.
+            # Bilinear is much cheaper than Lanczos for a decorative full-screen image.
+            img_ratio = img.width / img.height
+            screen_ratio = self.width / self.height
 
-        if img_ratio > screen_ratio:
-            new_height = self.height
-            new_width = int(new_height * img_ratio)
-        else:
-            new_width = self.width
-            new_height = int(new_width / img_ratio)
+            if img_ratio > screen_ratio:
+                new_height = self.height
+                new_width = int(new_height * img_ratio)
+            else:
+                new_width = self.width
+                new_height = int(new_width / img_ratio)
 
-        img = img.resize((new_width, new_height), Image.LANCZOS)
+            img = img.resize((new_width, new_height), Image.BILINEAR)
 
-        left = (new_width - self.width) // 2
-        top = (new_height - self.height) // 2
-        img = img.crop((left, top, left + self.width, top + self.height))
+            left = (new_width - self.width) // 2
+            top = (new_height - self.height) // 2
+            img = img.crop((left, top, left + self.width, top + self.height))
+            _EYES_BACKGROUND_CACHE[cache_key] = img
 
         # Keep one screen-sized image. Creating several full-resolution
         # brightness variants delayed lock display and consumed substantial RAM.

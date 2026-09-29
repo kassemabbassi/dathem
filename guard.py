@@ -135,6 +135,7 @@ def lock_windows():
 
 
 def analyze_frame(frame):
+    analysis_started = time.perf_counter()
     # Face detection and encoding dominate CPU time. Processing half-size
     # frames cuts the pixel work substantially while retaining enough detail
     # for ordinary webcam distances.
@@ -144,14 +145,19 @@ def analyze_frame(frame):
             interpolation=cv2.INTER_AREA,
         )
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    detection_started = time.perf_counter()
     locations = face_recognition.face_locations(
         rgb, number_of_times_to_upsample=0, model="hog"
     )
+    detection_ms = (time.perf_counter() - detection_started) * 1000
+    encoding_started = time.perf_counter()
     encodings = face_recognition.face_encodings(rgb, locations, num_jitters=1)
+    encoding_ms = (time.perf_counter() - encoding_started) * 1000
 
     total = len(encodings)
     unknown_count = 0
     names_seen = []
+    comparison_started = time.perf_counter()
 
     for enc in encodings:
         distances = face_recognition.face_distance(known_encodings, enc)
@@ -164,7 +170,13 @@ def analyze_frame(frame):
             unknown_count += 1
             names_seen.append("unknown")
 
-    return total, unknown_count, names_seen
+    metrics = {
+        "detect_ms": detection_ms,
+        "encode_ms": encoding_ms,
+        "compare_ms": (time.perf_counter() - comparison_started) * 1000,
+        "total_ms": (time.perf_counter() - analysis_started) * 1000,
+    }
+    return total, unknown_count, names_seen, metrics
 
 
 def grant_session_trust(encoding):
@@ -256,9 +268,7 @@ def main():
                 time.sleep(READ_ERROR_RETRY)
                 continue
 
-            analysis_started = time.perf_counter()
-            total, unknown_count, names_seen = analyze_frame(frame)
-            analysis_ms = (time.perf_counter() - analysis_started) * 1000
+            total, unknown_count, names_seen, analysis_metrics = analyze_frame(frame)
             now = time.time()
 
             if total == 0:
@@ -288,7 +298,13 @@ def main():
                 elif has_unknown:
                     companion_present = False
                     if now - last_analysis_timing_log >= 5:
-                        print(f"PERF face analysis before unknown lock: {analysis_ms:.0f} ms")
+                        print(
+                            "PERF face analysis before unknown lock: "
+                            f"detect={analysis_metrics['detect_ms']:.0f} ms, "
+                            f"encode={analysis_metrics['encode_ms']:.0f} ms, "
+                            f"compare={analysis_metrics['compare_ms']:.0f} ms, "
+                            f"total={analysis_metrics['total_ms']:.0f} ms"
+                        )
                         last_analysis_timing_log = now
                     report_status(f"Faces: {names_seen} -> unknown present; locking immediately", now)
                     if (now - last_lock_time) > LOCK_COOLDOWN:

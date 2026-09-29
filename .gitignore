@@ -1,5 +1,12 @@
-venv/
-dathem-mobile/node_modules/
-dathem-mobile/.expo/
-build/
-dist/
+# Dépôt limité aux sources du service DATHEM Agent V1.
+# Tout nouveau fichier doit être autorisé explicitement ci-dessous.
+/*
+!/README.md
+!/.gitignore
+!/dathem_config.py
+!/guard.py
+!/lock_screen.py
+!/requirements.txt
+!/service.py
+!/setup.py
+!/eyes.jpg
