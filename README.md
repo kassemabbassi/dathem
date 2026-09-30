@@ -8,7 +8,7 @@ Le service est en **démarrage manuel** : après le démarrage de Windows, l’u
 
 ## Sources du projet
 
-Le `.gitignore` autorise uniquement les fichiers nécessaires à la version Windows :
+Le `.gitignore` autorise uniquement les sources du service et leur documentation :
 
 | Fichier | Fonction |
 |---|---|
@@ -19,6 +19,8 @@ Le `.gitignore` autorise uniquement les fichiers nécessaires à la version Wind
 | `dathem_config.py` | Configuration et chemins des profils et journaux locaux |
 | `eyes.jpg` | Image d’arrière-plan de l’interface |
 | `requirements.txt` | Dépendances Python et outil de compilation |
+| `guide.md` | Instructions de mise à jour et d’installation sur un autre PC |
+| `linkedin.txt` | Brouillon de présentation du projet |
 
 Les profils, journaux, données d’encodage facial, environnements virtuels, exécutables compilés et anciens fichiers ne doivent pas être ajoutés au dépôt.
 
@@ -102,6 +104,19 @@ Test-Path "$env:LOCALAPPDATA\DathemAgentV1\profile.json"
 
 Le résultat attendu est `True`. Ne copie pas le profil d’un autre utilisateur.
 
+## Fluidité de l’assistant d’inscription
+
+L’assistant sépare maintenant la caméra, la détection et l’interface pour éviter de figer l’aperçu pendant les calculs :
+
+- La caméra conserve la dernière image disponible et demande une résolution de 640×480 avec une mémoire tampon courte.
+- L’interface actualise l’aperçu à un intervalle cible de 33 ms. La détection de guidage travaille sur une image réduite à 50 % et attend 120 ms après chaque analyse avant de recommencer; la durée de calcul s’ajoute à cet intervalle.
+- Au clic sur **Capturer**, l’assistant réutilise l’image pleine résolution correspondant à la dernière détection. Il encode le visage en arrière-plan et évite une deuxième détection complète, pendant que l’aperçu continue de s’actualiser.
+- Le temps affiché à côté du numéro de capture mesure le délai du clic jusqu’à la fin de l’encodage. Les images de caméra ne sont pas enregistrées dans le profil.
+
+Les intervalles de 33 ms et 120 ms sont des objectifs de rafraîchissement, pas une garantie de fréquence d’images. Le résultat dépend du processeur, de la caméra, du pilote, de l’éclairage et de la distance du visage.
+
+Pour transférer cette version sur un autre PC, mettre à jour une installation existante ou faire une première installation, suis le [guide d’installation pour les amis](guide.md).
+
 ### 7. Installer et lancer le service
 
 Ouvre **PowerShell en tant qu’administrateur**, sur le même PC :
@@ -130,4 +145,3 @@ sc.exe query DathemAgentV1
 ```
 
 Attends l’état `STOPPED`.
-

@@ -2,6 +2,8 @@
 # Tout nouveau fichier doit être autorisé explicitement ci-dessous.
 /*
 !/README.md
+!/guide.md
+!/linkedin.txt
 !/.gitignore
 !/dathem_config.py
 !/guard.py
@@ -10,3 +12,5 @@
 !/service.py
 !/setup.py
 !/eyes.jpg
+guide.md
+linkedin.txt
