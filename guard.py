@@ -120,18 +120,19 @@ else:
     print("DATHEM profile not found. Run DathemAgentV1Setup.exe first.")
 
 
-def lock_windows():
+def lock_windows(cam):
     """Shows the lock screen and blocks until unlocked. If the correct
     password was entered, returns the face encoding captured at that
     moment so the caller can grant this person session-level trust.
-    Returns None if no face could be captured (encoding stays untrusted)."""
+    Also reports whether the surveillance camera handle can be reused."""
     print(">>> TRIGGERING LOCK SCREEN <<<")
     screen = LockScreen(
         known_encodings=known_encodings,
         tolerance=TOLERANCE,
         password_verifier=lambda candidate: verify_password(candidate, profile),
+        unlock_camera=cam,
     )
-    return screen.captured_encoding
+    return screen.captured_encoding, screen.reuse_unlock_camera
 
 
 def analyze_frame(frame):
@@ -203,18 +204,20 @@ def open_camera():
 
 
 def trigger_lock(cam):
-    """Releases the main-loop camera handle before showing the lock
-    screen (which needs its own exclusive access to the webcam to
-    capture the unlocking person's face), then reopens it afterward.
-    Returns a fresh, working VideoCapture object to keep using in the
-    main loop - the caller must replace its `cam` variable with it."""
-    print(">>> Releasing camera before showing lock screen...")
-    cam.release()
+    """Temporarily transfers the camera handle to the lock screen.
 
-    captured = lock_windows()
+    The surveillance loop is blocked here, so the lock-screen worker can use
+    the existing camera sequentially. Reopen the device only if its driver
+    cannot return the shared handle safely.
+    """
+    captured, camera_reusable = lock_windows(cam)
     grant_session_trust(captured)
 
-    print(">>> Reopening camera after unlock...")
+    if camera_reusable and cam.isOpened():
+        print(">>> Camera handle returned to surveillance loop <<<")
+        return cam
+
+    print(">>> Reopening camera after lock-screen camera handoff fallback...")
     new_cam = open_camera()
     if not new_cam.isOpened():
         print("WARNING: Could not reopen camera after unlock. "

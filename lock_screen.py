@@ -15,7 +15,10 @@ _EYES_BACKGROUND_CACHE = {}
 
 
 class LockScreen:
-    def __init__(self, known_encodings=None, tolerance=0.5, password_verifier=None):
+    def __init__(
+        self, known_encodings=None, tolerance=0.5, password_verifier=None,
+        unlock_camera=None,
+    ):
         init_started = time.perf_counter()
         self.root = tk.Tk()
         # There is a separate Tk root for desktop notifications. Bind every
@@ -23,7 +26,9 @@ class LockScreen:
         self.known_encodings = list(known_encodings or [])
         self.tolerance = tolerance
         self.password_verifier = password_verifier
-        self.unlock_cam = None
+        self.unlock_cam = unlock_camera
+        self._owns_unlock_camera = unlock_camera is None
+        self.reuse_unlock_camera = True
         self._face_stop = threading.Event()
         self._face_results = queue.Queue(maxsize=1)
         self._face_state_lock = threading.Lock()
@@ -522,31 +527,43 @@ class LockScreen:
         return "break"
 
     def release_unlock_camera(self):
-        if self.unlock_cam is not None:
+        if self._owns_unlock_camera and self.unlock_cam is not None:
             self.unlock_cam.release()
             self.unlock_cam = None
 
     def _face_recognition_worker(self):
         """Read and recognize camera frames without blocking Tk's event loop."""
-        # Opening the camera can block on some Windows drivers. Do it away from
-        # Tk so the lock surface remains visible while the device initializes.
-        cam = cv2.VideoCapture(0)
-        self.unlock_cam = cam
+        # The service agent can pass its already-open camera handle. Otherwise,
+        # open a private handle here, away from Tk's event loop.
+        cam = self.unlock_cam
+        if self._owns_unlock_camera:
+            cam = cv2.VideoCapture(0)
+            self.unlock_cam = cam
         if cam.isOpened():
-            cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if self._owns_unlock_camera:
+                cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         else:
-            cam.release()
-            self.unlock_cam = None
+            self.reuse_unlock_camera = False
+            if self._owns_unlock_camera:
+                cam.release()
+                self.unlock_cam = None
             print("WARNING: Camera unavailable for automatic face unlock.")
             return
         try:
+            read_failures = 0
             while cam is not None and not self._face_stop.is_set():
                 ret, frame = cam.read()
                 if not ret:
+                    read_failures += 1
+                    if read_failures >= 5:
+                        self.reuse_unlock_camera = False
+                        print("WARNING: Camera handoff stopped returning frames; reopening after unlock.")
+                        break
                     self._face_stop.wait(0.05)
                     continue
+                read_failures = 0
 
                 small = cv2.resize(
                     frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA
@@ -577,11 +594,12 @@ class LockScreen:
                 # responsive face unlock. Tk remains free to animate meanwhile.
                 self._face_stop.wait(0.15)
         except Exception as exc:
+            self.reuse_unlock_camera = False
             print(f"WARNING: Face recognition worker failed: {exc}")
         finally:
-            if cam is not None:
+            if self._owns_unlock_camera and cam is not None:
                 cam.release()
-            self.unlock_cam = None
+                self.unlock_cam = None
 
     def poll_authorized_face(self):
         """Apply a worker recognition result on Tk's main thread."""
@@ -599,15 +617,35 @@ class LockScreen:
         self.root.destroy()
 
     def stop_face_worker(self):
+        handoff_started = time.perf_counter()
         self._face_stop.set()
         worker = self._face_worker
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=2.0)
             if worker.is_alive():
-                self.release_unlock_camera()
+                if self._owns_unlock_camera:
+                    self.release_unlock_camera()
+                else:
+                    # If the driver is still blocked in read(), abandon reuse
+                    # and let the caller open a fresh handle as a fallback.
+                    self.reuse_unlock_camera = False
+                    if self.unlock_cam is not None:
+                        self.unlock_cam.release()
+                        self.unlock_cam = None
                 worker.join(timeout=1.0)
-        if worker is None or not worker.is_alive():
+        if self._owns_unlock_camera and (worker is None or not worker.is_alive()):
             self.release_unlock_camera()
+        elif not self._owns_unlock_camera and not self.reuse_unlock_camera:
+            if self.unlock_cam is not None:
+                self.unlock_cam.release()
+                self.unlock_cam = None
+
+        if not self._owns_unlock_camera:
+            print(
+                "PERF camera handoff after unlock: "
+                f"{(time.perf_counter() - handoff_started) * 1000:.0f} ms; "
+                f"reused={self.reuse_unlock_camera}"
+            )
 
     def flash_wrong(self):
         self.canvas.itemconfig(self.overlay_id, fill="#5a0000")
